@@ -1,0 +1,92 @@
+
+name: Build Aseprite for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Skia
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          this_dir=$(cygpath "${{ github.workspace }}")
+          skia_url=$(source "$this_dir/laf/misc/skia-url.sh" | xargs)
+          skia_file=$(basename "$skia_url")
+
+          curl --ssl-revoke-best-effort -fL --retry 3 \
+            -o "$skia_file" "$skia_url"
+
+          unzip -q "$skia_file" -d skia
+
+      - name: Install Ninja
+        uses: aseprite/get-ninja@main
+
+      - name: Set up MSVC
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_SCRIPTING=ON \
+            -DENABLE_CCACHE=OFF \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR="$(realpath skia)" \
+            -DSKIA_LIBRARY_DIR="$(realpath skia)/out/Release-x64"
+
+      - name: Compile Aseprite
+        shell: bash
+        run: cmake --build build --parallel 2
+
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $bin = Join-Path $PWD "build/bin"
+          $exe = Join-Path $bin "aseprite.exe"
+
+          if (!(Test-Path $exe)) {
+            throw "aseprite.exe was not found. Build may have failed."
+          }
+
+          New-Item -ItemType Directory -Force `
+            -Path "package/aseprite" | Out-Null
+
+          Copy-Item -Path "$bin/*" `
+            -Destination "package/aseprite" -Recurse -Force
+
+          Compress-Archive `
+            -Path "package/aseprite" `
+            -DestinationPath "aseprite-windows-x64.zip" `
+            -CompressionLevel Optimal
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aseprite-windows-x64
+          path: aseprite-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 7
